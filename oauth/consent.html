@@ -82,7 +82,8 @@
 
   const { data: me, error: meError } = await supabase.schema("mcp").rpc("whoami");
   const email = session.user?.email ?? "";
-  if (meError || !me?.pulse_access) {
+  if (meError) return fail("Couldn't check your Pulse access: " + meError.message);
+  if (!me?.pulse_access) {
     show(`<div class="who">Signed in as <b>${esc(email)}</b></div>
       <p class="warn">${esc(me?.note ?? "This account isn't set up for Pulse.")}</p>
       <p class="sub">Only active Manor Build office staff can connect Pulse. Ask Rob if you think this is wrong.</p>
