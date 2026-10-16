@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Pulse sign-in</title>
+<!--
+  Pulse sign-in (OAuth consent page) for the Pulse connector in Claude.
+  Supabase Auth sends people here as <Site URL>/oauth/consent?authorization_id=...
+  1. Sign in with Microsoft 365 (Supabase "azure" provider, Entra app "Pulse").
+  2. Check the person is active Pulse office staff (mcp.whoami).
+  3. Allow or Deny; Supabase then returns them to Claude.
+  Contains only the project URL and the publishable key, which are public by design. No secrets.
+  Design: Manor-Group-NZ-Ltd/pulse docs/PULSE_CONNECTOR_DESIGN.md
+-->
+<style>
+  :root { --bg: #f5f4f0; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #e2e0d8; --accent: #1f4e3d; --accent-ink: #ffffff; --warn: #9a3412; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --card: #22221f; --ink: #f1f0ea; --muted: #a3a29b; --line: #3a3934; --accent: #5fa585; --accent-ink: #0d1f17; --warn: #f0a07a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 16px; }
+  main { width: 100%; max-width: 440px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .9rem; }
+  ul { padding-left: 1.2em; margin: 12px 0 20px; }
+  li { margin: 4px 0; }
+  .who { background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: .9rem; margin-bottom: 16px; }
+  .row { display: flex; gap: 10px; }
+  button { flex: 1; font: inherit; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .warn { color: var(--warn); }
+  .small { font-size: .8rem; color: var(--muted); margin-top: 16px; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main id="app"><h1>Pulse</h1><p class="sub">Loading…</p></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.95.0/dist/umd/supabase.js"></script>
+<script>
+(async () => {
+  const SUPABASE_URL = "https://pqktuashmnsqxehhyznu.supabase.co";
+  const PUBLISHABLE_KEY = "sb_publishable_Y0zE3dmGNyCjTsP4ea6m_w_JJBI0PFv";
+  const HERE = location.origin + location.pathname;
+  const app = document.getElementById("app");
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const show = (html) => { app.innerHTML = "<h1>Pulse</h1>" + html; };
+  const fail = (msg) => show(`<p class="sub warn">${esc(msg)}</p><p class="small">Close this tab and try connecting again from Claude. If it keeps happening, tell Rob.</p>`);
+
+  const supabase = window.supabase.createClient(SUPABASE_URL, PUBLISHABLE_KEY, {
+    auth: { flowType: "pkce", detectSessionInUrl: true, persistSession: true },
+  });
+
+  // keep the authorization id across the Microsoft sign-in round trip
+  const params = new URLSearchParams(location.search);
+  if (params.get("authorization_id")) sessionStorage.setItem("pulse_authorization_id", params.get("authorization_id"));
+  const authorizationId = sessionStorage.getItem("pulse_authorization_id");
+  if (params.get("error_description")) return fail("Microsoft sign-in failed: " + params.get("error_description"));
+  if (!authorizationId) return fail("This page is only used when connecting Pulse to Claude.");
+
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) {
+    show(`<p class="sub">Sign in with your Manor Build Microsoft account to connect Pulse to Claude.</p>
+      <div class="row"><button class="primary" id="ms">Sign in with Microsoft</button></div>`);
+    document.getElementById("ms").onclick = () =>
+      supabase.auth.signInWithOAuth({ provider: "azure", options: { scopes: "email", redirectTo: HERE } });
+    return;
+  }
+
+  const finish = async (fn) => {
+    app.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    const { data, error } = await fn(authorizationId);
+    if (error) return fail(error.message);
+    sessionStorage.removeItem("pulse_authorization_id");
+    location.href = data.redirect_url;
+  };
+  const deny = () => finish((id) => supabase.auth.oauth.denyAuthorization(id));
+  const switchAccount = async () => { await supabase.auth.signOut(); location.href = HERE; };
+
+  const { data: me, error: meError } = await supabase.schema("mcp").rpc("whoami");
+  const email = session.user?.email ?? "";
+  if (meError || !me?.pulse_access) {
+    show(`<div class="who">Signed in as <b>${esc(email)}</b></div>
+      <p class="warn">${esc(me?.note ?? "This account isn't set up for Pulse.")}</p>
+      <p class="sub">Only active Manor Build office staff can connect Pulse. Ask Rob if you think this is wrong.</p>
+      <div class="row"><button id="deny">Close</button><button id="other">Use another account</button></div>`);
+    document.getElementById("deny").onclick = deny;
+    document.getElementById("other").onclick = switchAccount;
+    return;
+  }
+
+  const { data: details, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error) return fail(error.message);
+  if (!details.authorization_id && details.redirect_url) { // already allowed before
+    sessionStorage.removeItem("pulse_authorization_id");
+    location.href = details.redirect_url;
+    return;
+  }
+  const clientName = details.client?.name ?? "An app";
+  let returnHost = "";
+  try { returnHost = new URL(details.redirect_uri).host; } catch (_) {}
+  show(`<p class="sub">${esc(clientName)} wants to use Pulse as you.</p>
+    <div class="who">Signed in as <b>${esc(me.staff_name)}</b> (${esc(email)}), role ${esc(me.role)}</div>
+    <p style="margin:0">If you allow it, ${esc(clientName)} can:</p>
+    <ul>
+      <li>read the Pulse data your role can see: contacts, deals, pipeline, activity, projects and Pulse Work cards</li>
+      <li>nothing else for now: it can't change anything</li>
+    </ul>
+    <div class="row"><button id="deny">Deny</button><button class="primary" id="allow">Allow</button></div>
+    <p class="small">Returns to ${esc(returnHost)}. You can disconnect any time in Claude under Settings, then Connectors.
+      <a href="#" id="other">Not you?</a></p>`);
+  document.getElementById("allow").onclick = () => finish((id) => supabase.auth.oauth.approveAuthorization(id));
+  document.getElementById("deny").onclick = deny;
+  document.getElementById("other").onclick = (e) => { e.preventDefault(); switchAccount(); };
+})().catch((e) => {
+  document.getElementById("app").innerHTML = "<h1>Pulse</h1><p class='sub'>Something went wrong: " +
+    String(e && e.message || e).replace(/[<>&]/g, "") + "</p>";
+});
+</script>
+</body>
+</html>
